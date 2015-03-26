@@ -23,7 +23,6 @@ public:
     constexpr static double counterclockwise_pitch_factor    = 5 * 3.14 / 180;
     constexpr static double counterclockwise_yaw_factor    = 5 * 3.14 / 180;
 
-
     KeyboardHandler() {}
     ~KeyboardHandler() {}
     bool

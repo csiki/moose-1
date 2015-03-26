@@ -96,6 +96,7 @@ class ReadCell
 			vector< string >::iterator args );
 */
 		
+		void addChannelMessage( Id chan );
 		void countProtos();
 		
 		// For error messages

@@ -112,7 +112,7 @@ class DotFile():
                 typeNode = kwargs[k]
                 if typeNode == moose.Compartment:
                     params['shape'] = self.compShape
-                    params['label'] = short_label(nodeName, 0)
+                    params['label'] = self.label(nodeName)
                 elif typeNode == moose.HHChannel:
                     params = self.addHHCHannelNode(node, params)
                 elif typeNode == moose.SimpleSynHandler:
@@ -370,7 +370,6 @@ def writeGraphviz(filename=None, root='', cluster=True, ignore=None, **kwargs):
             subgraphDict[clustername] = pops[pop]
             for x in pops[pop]: dotFile.subgraphDict[x] = clustername
     dotFile.textDict['subgraphs'] = subgraphDict
-
     dotFile.writeDotFile(filename, kwargs)
     return True
 
