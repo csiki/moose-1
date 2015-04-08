@@ -312,7 +312,7 @@ endif()
 
 ######################################## MOOGLI ################################
 # Moogli as external project
-OPTION(BUILD_MOOGLI "Build moogli extension." ON)
+OPTION(BUILD_MOOGLI "Build moogli extension." OFF)
 IF(BUILD_MOOGLI)
     MESSAGE("++ Building MOOGLI")
     #SET(MOOGL_SRC_PATH ${PROJECT_SOURCE_DIR}/python/moogli)
