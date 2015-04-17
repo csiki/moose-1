@@ -1,84 +1,49 @@
-#include <cuda.h>
-#include <iostream>
 #include "GpuLookup.h"
+#include <cuda.h>
+#include <thrust/host_vector.h>
+#include <thrust/device_vector.h>
 
-__global__ void lookup_kernel(double *row_array, double *column_array, double *table_d, unsigned int *nRows_d, unsigned int *nColumns_d, double *istate, double dt)
+#ifdef _WINDOWS_
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#endif
+
+// NOTE: THE STRUCTURE OF TABLE IS UNSUITABLE FOR GPGPU CALCULATIONS
+// MEMORY ACCESS PATTERN DOES NOT ALLOW USE OF TEXTURE OR CONSTANT MEMORY
+// TABLE HAS TO BE STORED IN A 2D TEXTURE MEMORY - ALSO THE DEPENDENCY AMONG ROW_ARRAY, COLUMN_ARRAY AND TABLE ARE JUST TOO HIGH
+__global__ void lookup_kernel(double *row_array, double *column_array, double *table, unsigned int nRows, unsigned int nColumns, double *istate, double dt)
 {
-
-	int tId = threadIdx.x;
+	const unsigned int tId = threadIdx.x + (blockDim.x * (blockIdx.x + (gridDim.x * blockIdx.y))); // 2D grid and 1D block
+	if (tId >= nRows) return;
 
 	int row = row_array[tId];
 	double fraction = row_array[tId]-row;
 
 	double column = column_array[tId];
 
-	double *a = table_d, *b = table_d;
+	double *a = table, *b = table;
 
-	a += (int)(row + column * (*nRows_d));
-	b += (int)(row + column * (*nRows_d) + *nRows_d);
+	a += (int)(row + column * nRows);
+	b += (int)(row + column * nRows + nRows);
 
 	double C1 = *a + (*(a+1) - *a) * fraction;
 	double C2 = *b + (*(b+1) - *b) * fraction;
 
 	double temp = 1.0 + dt / 2.0 * C2;
-    istate[tId] = ( istate[tId] * ( 2.0 - temp ) + dt * C1 ) / temp; 
+    istate[tId] = ( istate[tId] * ( 2.0 - temp ) + dt * C1 ) / temp;
 }
 
-__global__ void do_nothing(double *result_d)
+GpuLookupTable::GpuLookupTable() {}
+
+GpuLookupTable::GpuLookupTable(double min, double max, int nDivs, unsigned int nSpecies)
+	: min_(min), max_(max), deviceUpdateNeeded_(false)
 {
-	int tId = threadIdx.x;
-	result_d[tId] = 0;
-}
-
-
-GpuLookupTable::GpuLookupTable()
-{
-
-}
-
-GpuLookupTable::GpuLookupTable(double *min, double *max, int *nDivs, unsigned int nSpecies)
-{
-	min_ = *min;
-	max_ = *max;
 	// Number of points is 1 more than number of divisions.
 	// Then add one more since we may interpolate at the last point in the table.
-	nPts_ = *nDivs + 1 + 1;
-	dx_= ( *max - *min ) / *nDivs;
+	nPts_ = nDivs + 1 + 1;
+	dx_= ( max - min ) / nDivs;
 	// Every row has 2 entries for each type of gate
-	nColumns_ = 0;//2 * nSpecies;
-
-	cudaMalloc((void **)&min_d, sizeof(double));
-	cudaMalloc((void **)&max_d, sizeof(double));
-	cudaMalloc((void **)&nPts_d, sizeof(unsigned int));
-	cudaMalloc((void **)&dx_d, sizeof(double));
-	cudaMalloc((void **)&nColumns_d, sizeof(unsigned int));
-
-
- 	cudaMemcpy( min_d, min, sizeof(double), cudaMemcpyHostToDevice);
- 	cudaMemcpy( max_d, max, sizeof(double), cudaMemcpyHostToDevice);
- 	cudaMemcpy( nPts_d, &nPts_, sizeof(unsigned int), cudaMemcpyHostToDevice);
- 	cudaMemcpy( dx_d, &dx_, sizeof(double), cudaMemcpyHostToDevice);
- 	cudaMemcpy( nColumns_d, &nColumns_, sizeof(unsigned int), cudaMemcpyHostToDevice);
-}
-
-void GpuLookupTable::findRow(double *V, double *rows, int size)
-{
-	 for (int i=0; i<size; i++)
-	{
-		double x = V[i];
-
-		if ( x < min_ )
-			x = min_;
-		else if ( x > max_ )
-			x = max_;
-	 	rows[i] = ( x - min_ ) / dx_;
-	// 	//std::cout << "&&&&" << rows[i] << "\n";
-	}
-}
-
-void GpuLookupTable::sayHi()
-{
-	std::cout << "Hi there! ";
+	nColumns_ = 0; //2 * nSpecies;
 }
 
 // Columns are arranged in memory as    |	They are visible as
@@ -95,72 +60,60 @@ void GpuLookupTable::sayHi()
 
 void GpuLookupTable::addColumns(int species, double *C1, double *C2)
 {
-	double *table_temp_d;
-
-	cudaMalloc((void **)&table_temp_d, (nPts_ * (nColumns_+2)) * sizeof(double));
-
-	//Copy old values to new table
-	cudaMemcpy(table_temp_d, table_d, (nPts_ * (nColumns_)) * sizeof(double), cudaMemcpyDeviceToDevice);
-
-	//Free memory occupied by the old table
-	cudaFree(table_d);
-	table_d = table_temp_d;
-
-	//Get iTable to point to last element in the table
-	double *iTable = table_d + (nPts_ * nColumns_);
-	
-	// Loop until last but one point
-	for (int i=0; i<nPts_-1; i++ )
-	{
-		//std::cout << i << " " << C1[i] << " " << C2[i] << "\n";
-		cudaMemcpy(iTable, &C1[i], sizeof(double), cudaMemcpyHostToDevice);
-		iTable++;
-		
-	}
-	// Then duplicate the last point
-	cudaMemcpy(iTable, &C1[nPts_-2], sizeof(double), cudaMemcpyHostToDevice);
-	iTable++;
-
-	//Similarly for C2
-	for (int i=0; i<nPts_-1; i++ )
-	{
-		cudaMemcpy(iTable, &C2[i], sizeof(double), cudaMemcpyHostToDevice);
-		iTable++;
-	}
-	cudaMemcpy(iTable, &C2[nPts_-2], sizeof(double), cudaMemcpyHostToDevice);
-	iTable++;
-
+	// NOTE: COPYING COLUMN VALUES TO GLOBAL DEVICE MEMORY ONE BY ONE IS EXTREMELY SLOW AND UNNECESSARY
+	// HOST_VECTOR CAN BE POPULATED WITHOUT ANY MEMORY TRAFFIC OVERHEAD AND ONLY COPIED TO DEVICE WHEN GPU CALCULATION IS INITIATED
 	nColumns_ += 2;
+	table.reserve(nPts_ * (nColumns_));
 
+	// add C1 values
+	for (size_t i = 0; i < nPts_ - 1; ++i)
+		table.push_back(C1[i]);
+	table.push_back(C1[nPts_ - 2]);
 
+	// add C2 values
+	for (size_t i = 0; i < nPts_ - 1; ++i)
+		table.push_back(C2[i]);
+	table.push_back(C2[nPts_ - 2]);
+
+	deviceUpdateNeeded_ = true;
 }
 
 void GpuLookupTable::lookup(double *row, double *column, double *istate, double dt, unsigned int set_size)
 {
-	double *row_array_d;
-	double *column_array_d;
+	// NOTE: THESE DO THE ALLOCATION OF DEVICE MEMORY AND ALSO THE COPY FROM HOST TO DEVICE IN ONE STATEMENT
+	// WITHOUT ANY OVERHEAD COMPARED TO THE ORIGINAL SOLUTION
+	thrust::device_vector<double> row_d(row, row + set_size);
+	thrust::device_vector<double> col_d(column, column + set_size);
+	thrust::device_vector<double> istate_d(istate, istate + set_size);
+	if (deviceUpdateNeeded_)
+	{
+		thrust::device_vector<double> table_d = table; // here complete table is copied to device memory
+		deviceUpdateNeeded_ = false;
+	}
 
-	// result_ = new double[set_size];
+	dim3 grid, block;
+	calcGridBlockDims(grid, block, set_size);
+	lookup_kernel<<<grid, block>>>(thrust::raw_pointer_cast(row_d.data()), thrust::raw_pointer_cast(col_d.data()),
+		thrust::raw_pointer_cast(table_d.data()), nPts_, nColumns_, thrust::raw_pointer_cast(istate_d.data()), dt);
 
-	// cudaMalloc((void **)&result_d, set_size*sizeof(double));
+	// retrieve calculated states (copy back from device)
+	thrust::copy(istate_d.begin(), istate_d.end(), istate);
+}
 
-	cudaMalloc((void **)&row_array_d, set_size*sizeof(double));
-	cudaMalloc((void **)&column_array_d, set_size*sizeof(double));
-	cudaMalloc((void **)&istate_d, set_size*sizeof(double));
-
-	cudaMemcpy(row_array_d, row, set_size*sizeof(double), cudaMemcpyHostToDevice);
-	cudaMemcpy(column_array_d, column, set_size*sizeof(double), cudaMemcpyHostToDevice);
-	cudaMemcpy(istate_d, istate, set_size*sizeof(double), cudaMemcpyHostToDevice);
-
-	lookup_kernel<<<1,set_size>>>(row_array_d, column_array_d, table_d, nPts_d, nColumns_d, istate_d, dt);
-
-	// cudaMemcpy(result_, result_d, set_size*sizeof(double), cudaMemcpyDeviceToHost);
-
-	// std::cout << "Gpu Lookup result :  "; 
-	// for (int i=0; i<set_size; i++)
-	// 	std::cout << result_[i] << " ";
-	// std::cout << "\n";
-
-	// cudaMemcpy(result, result_, set_size*sizeof(double), cudaMemcpyHostToHost);
-	cudaMemcpy(istate, istate_d, set_size*sizeof(double), cudaMemcpyDeviceToHost);
+// NOTE: MACHINES WITH MULTIPLE DEVICES HAS TO BE TAKEN INTO ACCOUNT AS WELL - DECIDE ON WHICH LEVEL THE COMPUTATION IS DIVIDED AMONG DEVICES
+// The kernel parameters can be defined automatically and optimally if the kernel has to calculate only along a 1D vector
+void calcGridBlockDims(dim3& grid, dim3& block, unsigned int size)
+{
+	unsigned int threadNum = ((size - 1) / 32 + 1) * 32; // multiple of 32
+	if (threadNum > 512) // 512 or 1024 is the maximum number of threads
+		threadNum = 512;
+	block = dim3(threadNum);
+	
+	grid = dim3();
+	grid.x = (size - 1) / threadNum + 1;
+	if (grid.x > 65535) // 65535 is the max number of blocks in one dimension
+	{
+		grid.x = sqrt(grid.x - 1) + 1;
+		grid.y = grid.x;
+	}
 }
