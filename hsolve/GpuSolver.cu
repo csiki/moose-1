@@ -2,146 +2,78 @@
 #include <cuda.h>
 #include "GpuSolver.h"
 
+// NOTE: obviously I would not want to keep these _WINDOWS_ stuff in code. I just compile code on windows at the moment
+#ifdef _WINDOWS_
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#include <cmath>
+#endif
+
 using namespace std;
 
+// NOTE: THIS IMPLEMENTATION IS FAR FROM THE OPTIMAL SOLUTION, IT NEEDS REVISION AS I MENTIONED IN MY PROPOSAL
 __global__
-void lookupTable(double v, double *A_d, double *B_d, double *xmin_d, double *xmax_d, double *invDx_d, int *ASize_d, int *BSize_d){
-	if (v <= *xmin_d){
-		*A_d = A_d[0];
-		*B_d = B_d[0];
-	}
-	else if (v >= *xmax_d){
-		*A_d = A_d[*ASize_d];
-		*B_d = B_d[*BSize_d];
-	}
-	else{	
-		unsigned int index = (v-*xmin_d) * *invDx_d;
-		//assert(ASize_ > index && BSize_ > index);
-		//Check for lookupByInterpolation in the HHGate code
-		double frac = (v-*xmin_d-(index / *invDx_d)) * *invDx_d;
-		*A_d = A_d[index]*(1-frac) + A_d[index+1] * frac;
-		*B_d = B_d[index]*(1-frac) + B_d[index+1] * frac;
-	}
-}
-
- 
-__global__ 
-
-void findSumToN(int *n, int limit)
+void lookupTable(const double *V, const double *A_d, const double *B_d,
+				double xmin, double xmax, double invDx, int Vsize, int Asize, int Bsize,
+				double *A_out, double *B_out)
 {
-	int tId = threadIdx.x;
-	
-	for (int i=0; i<=(int)log2((double)limit); i++)
+	const unsigned int tId = threadIdx.x + (blockDim.x * (blockIdx.x + (gridDim.x * blockIdx.y))); // 2D grid and 1D block
+	if (tId >= Vsize) return;
+
+	if (V[tId] <= xmin)
 	{
-		if (tId%(int)(pow(2.0,(double)(i+1))) == 0){
-			if (tId+(int)pow(2.0, (double)i) >= limit) break;
-			n[tId] += n[tId+(int)pow(2.0, (double)i)];
-		}
-		__syncthreads();
+		A_out[tId] = A_d[0];
+		B_out[tId] = B_d[0];
+	}
+	else if (V[tId] >= xmax)
+	{
+		A_out[tId] = A_d[Asize];
+		B_out[tId] = B_d[Bsize];
+	}
+	else
+	{	
+		unsigned int index = (V[tId] - xmin) * invDx;						// INDEXED BY VOLTAGE
+		// check for lookupByInterpolation in the HHGate code
+		double frac = (V[tId] - xmin - (index / invDx)) * invDx;			// DIFFERENCE BETWEEN VOLTAGE AND LOOKUP VOLTAGE
+		A_out[tId] = A_d[index] * (1 - frac) + A_d[index+1] * frac;			// LINEAR INTERPOLATION USING THE DIFF AND INDEX
+		B_out[tId] = B_d[index] * (1 - frac) + B_d[index+1] * frac;
 	}
 }
-/*
-__global__
-void lookupTables(double v)
-{
-	int tId = threadIdx.x;
-}
-*/
-GpuInterface::GpuInterface()
-{
-	y = 20;
-	asize = y*sizeof(int);
-	for (int i=0; i<y; i++)
-		n[i] = i;
-}
 
-void GpuInterface::sayHi()
-{
-	cout << "Hello there\n";
-}
+GpuInterface::GpuInterface() {}
 
 //This is the reimplementation of the lookuptable code in biophysics/HHGate
 //Not the one in hsolve
-void GpuInterface::lookupTables(double &v, double *A, double *B) const
+// NOTE: interface is changed to be able to process multiple voltage values at the same time
+void GpuInterface::lookupTables(const std::vector<double>& V, std::vector<double>& A, std::vector<double>& B) const
 {
-/*
-	if (v <= xmin_){
-		*A = A[0];
-		*B = B[0];
-	}
-	else if (v >= xmax_){
-		*A = A[ASize_];
-		*B = B[BSize_];
-	}
-	else{	
-		unsigned int index = (v-xmin_) * invDx_;
-		//assert(ASize_ > index && BSize_ > index);
-		//Check for lookupByInterpolation in the HHGate code
-		double frac = (v-xmin_-(index/invDx_)) * invDx_;
-		*A = A_[index]*(1-frac) + A_[index+1] * frac;
-		*B = B_[index]*(1-frac) + B_[index+1] * frac;
-	}
-*/
-	dim3 dimBlocks(1,1);
-	dim3 dimGrid(1,1);
-	lookupTable<<<dimGrid, dimBlocks>>>(v, A_d, B_d, xmin_d, xmax_d, invDx_d, ASize_d, BSize_d);
+	thrust::device_vector<double> V_d(V);
+	thrust::device_vector<double> A_out(V.size());
+	thrust::device_vector<double> B_out(V.size());
 
-	cudaMemcpy(A, A_d, sizeof(double), cudaMemcpyDeviceToHost);
-	cudaMemcpy(B, B_d, sizeof(double), cudaMemcpyDeviceToHost);
+	dim3 grid, block;
+	calcGridBlockDims(grid, block, V.size()); // more sophisticated grid and block dim calc is needed that takes into account the channel types
+	lookupTable<<<grid, block>>>(thrust::raw_pointer_cast(V_d.data()),
+		thrust::raw_pointer_cast(A_d.data()), thrust::raw_pointer_cast(B_d.data()),
+		xmin, xmax, invDx, V.size(), Asize, Bsize,
+		thrust::raw_pointer_cast(A_out.data()), thrust::raw_pointer_cast(B_out.data()));
+
+	// copy back results to host
+	A.assign(A_out.begin(), A_out.end());
+	B.assign(B_out.begin(), B_out.end());
 }
 
 
 //This is the reimplementation of the setuptable code in biophysics/HHGate
 //Not the one in hsolve
-void GpuInterface::setupTables(double *A, double *B, double ASize, double BSize, double* xmin, double* xmax, double* invDx)
+void GpuInterface::setupTables(const double *A, const double *B, int Asize, int Bsize, double xmin, double xmax, double invDx)
 {
-	cudaMalloc( (void**)&A_d, ASize*sizeof(double));
-	cudaMalloc( (void**)&B_d, BSize*sizeof(double));
-	cudaMalloc( (void**)&xmin_d, sizeof(double));
-	cudaMalloc( (void**)&xmax_d, sizeof(double));
-	cudaMalloc( (void**)&invDx_d, sizeof(double));
-	cudaMalloc( (void**)&ASize_d, sizeof(int));
-	cudaMalloc( (void**)&BSize_d, sizeof(int));
+	this->Asize = Asize;
+	this->Bsize = Bsize;
+	this->xmin = xmin;
+	this->xmax = xmax;
+	this->invDx = invDx;
 
-	cudaMemcpy(A_d, A, ASize*sizeof(double), cudaMemcpyHostToDevice);
-	cudaMemcpy(B_d, B, BSize*sizeof(double), cudaMemcpyHostToDevice);
-	cudaMemcpy(xmin_d, xmin, sizeof(double), cudaMemcpyHostToDevice);
-	cudaMemcpy(xmax_d, xmax, sizeof(double), cudaMemcpyHostToDevice);
-	cudaMemcpy(invDx_d, invDx, sizeof(double), cudaMemcpyHostToDevice);
-	cudaMemcpy(ASize_d, &ASize, sizeof(int), cudaMemcpyHostToDevice);
-	cudaMemcpy(BSize_d, &BSize, sizeof(int), cudaMemcpyHostToDevice);
+	A_d.assign(A, A + Asize);
+	B_d.assign(B, B + Bsize);
 }
-
-
-int GpuInterface::calculateSum()
-{
-	int *n_d;
-	cudaMalloc( (void**)&n_d, asize );
-
-        cudaMemcpy(n_d, n, asize, cudaMemcpyHostToDevice );
-
-        dim3 dimBlock( y, 1 );
-        dim3 dimGrid( 1, 1 );
-        findSumToN<<<dimGrid, dimBlock>>>(n_d, y);
-        cudaMemcpy(n, n_d, asize, cudaMemcpyDeviceToHost);
-        cudaFree (n_d);
-        return n[0];
-}
-
-void GpuInterface::setY(int newVal)
-{
-	y = newVal;
-	asize = y*sizeof(int);
-	for (int i=0; i<y; i++)
-                n[i] = i;
-
-}
-/*
-int main()
-{
-        GpuInterface obj;
-        obj.setY(20);
-        std::cout << obj.calculateSum();
-        return EXIT_SUCCESS;
-}
-*/
